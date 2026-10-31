@@ -340,7 +340,7 @@ bool ggml_cuda_stage_h2d(int device, void * dst, const void * src, size_t bytes,
 
 bool ggml_cuda_stage_2d_h2d(int device, void * dst, size_t dpitch, const void * src, size_t spitch,
                             size_t width, size_t height, void * stream) {
-    static const bool  enabled = stage_env_int("GGML_CUDA_STAGE", 0) != 0;
+    static const bool  enabled = stage_env_int("GGML_CUDA_STAGE", 1) != 0;
     static const bool  stats = stage_env_int("GGML_CUDA_STAGE_STATS", 0) != 0;
     static const size_t min_bytes = (size_t) stage_env_int("GGML_CUDA_STAGE_MIN_KB", 1024) << 10;
     if (!enabled || width == 0 || width * height < min_bytes || stage_skip_src(src)) {
