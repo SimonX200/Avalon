@@ -202,9 +202,9 @@ struct stage_ring {
     }
 
     bool init() {
-        const int mb = stage_env_int("GGML_CUDA_STAGE_MB", 64);
+        const int mb = stage_env_int("GGML_CUDA_STAGE_MB", 8);
         const int slots = stage_env_int("GGML_CUDA_STAGE_SLOTS", 12);
-        const int threads = stage_env_int("GGML_CUDA_STAGE_THREADS", 3);
+        const int threads = stage_env_int("GGML_CUDA_STAGE_THREADS", 4);
         if (mb <= 0 || slots < 2) {
             failed = true;
             return false;
@@ -221,13 +221,14 @@ struct stage_ring {
         }
         ev.assign(n_slots, nullptr);
         used.assign(n_slots, 0);
+        // ohne BlockingSync: gewartet wird auf dem Weg durch einen Prefill hundertfach pro Graph,
+        // und ein Schlaf mit Aufwachlatenz bremst den einsendenden Thread mehr als die Kopie selbst
         for (int i = 0; i < n_slots; i++) {
-            // ohne BlockingSync: gewartet wird auf dem Weg durch den Prefill hundertfach pro
-            // Graph — ein Schlaf mit Aufwachlatenz bremst den einsendenden Thread mehr als die
-            // Kopie selbst; das Warten auf ein Ereignis kostet hier einen Kern, und der ist leer
             if (cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming) != cudaSuccess) {
                 (void) cudaGetLastError();
                 ev[i] = nullptr;
+                failed = true;      // ohne Ereignis gibt es keine Flusskontrolle: der Ring wäre nicht sicher
+                return false;
             }
         }
         pool.start(n_threads - 1);   // the submitting thread does the first chunk itself
@@ -298,11 +299,11 @@ static bool stage_skip_src(const void * p) {
 }
 
 bool ggml_cuda_stage_h2d(int device, void * dst, const void * src, size_t bytes, void * stream) {
-    // Aus auf L28 gemessenen Grund: der Treiber-Stoffwechsel einer unpinnten Kopie ist dort schon
-    // so gut, dass der Umweg über den Ring (1.548 t/s mit 8 Fäden gegen 1.558 ohne) nichts holt.
-    // An bleibt er, wo `cudaHostRegister` zwar funktioniert, die Kopien aber langsam sind -
-    // GGML_CUDA_STAGE=1 schaltet ihn an, die Sonde tools/pinprobe.cu zeigt, was die Maschine hergibt.
-    static const bool  enabled = stage_env_int("GGML_CUDA_STAGE", 0) != 0;
+    // On by default after measuring on L28 (RTX 3090 Ti + RTX 3090, Gen4 x16, CUDA 13.4): prefill of
+    // 16.483 tokens 1.602-1.621 t/s against 1.558-1.570 without, decode unchanged. The ring only
+    // takes copies of memory the driver does not know, so a machine where cudaHostRegister accepts
+    // the model's mapping never pays the extra memcpy. GGML_CUDA_STAGE=0 switches it off.
+    static const bool  enabled = stage_env_int("GGML_CUDA_STAGE", 1) != 0;
     static const bool  stats = stage_env_int("GGML_CUDA_STAGE_STATS", 0) != 0;
     static const size_t min_bytes = (size_t) stage_env_int("GGML_CUDA_STAGE_MIN_KB", 1024) << 10;
     if (!enabled || bytes < min_bytes || stage_skip_src(src)) {

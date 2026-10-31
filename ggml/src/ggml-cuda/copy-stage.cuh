@@ -13,10 +13,11 @@
 // Both functions return true when the copy was queued, false when the caller has to copy itself
 // (turned off, source already pinned, too small to be worth the extra copy, or no ring).
 //
-// Off by default: on the machine this was built for (RTX 3090 Ti, Gen4 x16, CUDA 13.4) the driver's
-// own staging of an unregistered copy already reaches what the ring reaches, and the extra memcpy
-// costs the submitting thread — 1.548 t/s prefill with eight fill threads against 1.558 without
-// (docs/saettigung/03). GGML_CUDA_STAGE=1 turns it on; tools/pinprobe.cu measures a machine.
+// On by default: on the machine this was measured on (RTX 3090 Ti, Gen4 x16, CUDA 13.4) it is worth
+// 2,5 % prefill (1.602-1.621 against 1.558-1.570 t/s) and nothing on the decode, and it only takes
+// copies of memory the driver does not already know — a machine where cudaHostRegister accepts the
+// model's mapping never pays the extra memcpy. GGML_CUDA_STAGE=0 switches it off; tools/pinprobe.cu
+// measures what a machine can do, docs/saettigung/03 has the nine settings that were run.
 
 #include <stddef.h>
 
