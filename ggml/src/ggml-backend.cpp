@@ -3501,20 +3501,31 @@ static void ggml_backend_sched_prime_moe_cache(ggml_backend_sched_t sched, struc
             done += lb.second;
         }
         std::vector<int> per_backend(sched->n_backends, 0);
+        // the cache keeps the first tie of a tensor: a scheduler made later for the same session (llama_context::reserve)
+        // measures other free memory, and a layer it moves to a device whose pools were built without it has no hosted
+        // MoE block there (ggml_cuda_moe_hosted_block); the layer runs on the device that owns its experts
+        const auto tie = [&](const ggml_tensor * w, int b) {
+            void * owner = ggml_moe_cache.assign(sched->moe_cache_session, w->data, sched->backends[b]);
+            for (int i = 0; i < sched->n_backends && owner; i++) {
+                if ((void *) sched->backends[i] == owner) {
+                    return i;
+                }
+            }
+            return b;
+        };
         for (const ggml_tensor * node : experts) {
             const ggml_tensor * w = node->src[0];
             int layer;
             if (sscanf(w->name, "blk.%d.", &layer) == 1 && layer_backend.count(layer)) {
-                const int b = layer_backend[layer];
-                ggml_moe_cache.assign(sched->moe_cache_session, w->data, sched->backends[b]);
+                const int b = tie(w, layer_backend[layer]);
+                layer_backend[layer] = b;
                 per_backend[b]++;
             }
         }
         // the guest's (MTP draft's) expert tensors: its scheduler hosts its MoE block on the first GPU (it has no layer map)
         if (sched->moe_guest_weights && !gpus.empty()) {
             for (const ggml_tensor * w : *sched->moe_guest_weights) {
-                ggml_moe_cache.assign(sched->moe_cache_session, w->data, sched->backends[gpus[0]]);
-                per_backend[gpus[0]]++;
+                per_backend[tie(w, gpus[0])]++;
             }
         }
         for (int b = 0; b < sched->n_backends; b++) {

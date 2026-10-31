@@ -587,6 +587,9 @@ struct moe_cache_session {
     std::vector<std::unique_ptr<moe_cache_device>> devices;
     std::unordered_map<int, int> layer_devices;
     std::unordered_map<const void *, int> tensor_devices;
+    // the backend a tensor was first tied to (moe_cache_assign): the tie of a session outlives the scheduler that made
+    // it, so the owner is kept as a backend the scheduler can find its own index of
+    std::unordered_map<const void *, void *> tensor_backends;
     // KV: tensors of the KV cache whose end may be lent (moe_cache_kv_register), attached when the pools are built
     struct kv_tensor { const char * data; size_t bytes; size_t row_bytes; int logical; };
     std::vector<kv_tensor> kv_tensors;
@@ -3584,6 +3587,7 @@ static void moe_cache_invalidate_session(
         moe_cache_session & session, const void * base, size_t size) {
     std::unique_lock<std::mutex> lock(session.mu);
     session.tensor_devices.erase(base);
+    session.tensor_backends.erase(base);
     for (auto & device_ptr : session.devices) {
         // host weights are going away: a restoration must not queue a read of them again
         moe_cache_rewarm_stop_locked(*device_ptr);
@@ -3647,6 +3651,7 @@ static void moe_cache_invalidate_session(
             for (int r = 0; r < MOE_ROLES; r++) {
                 if (layer.tensor[r]) {
                     session.tensor_devices.erase(layer.tensor[r]);
+                    session.tensor_backends.erase(layer.tensor[r]);
                     device.seen_tensors.erase(layer.tensor[r]);
                     device.layer_of.erase(layer.tensor[r]);
                 }
@@ -4585,16 +4590,26 @@ static moe_cache_device * moe_cache_device_for_backend(
     return nullptr;
 }
 
-static void moe_cache_assign(void * opaque, const void * host_base, void * backend) {
+static void * moe_cache_assign(void * opaque, const void * host_base, void * backend) {
     moe_cache_session * session = (moe_cache_session *)opaque;
     if (!session || !host_base) {
-        return;
+        return nullptr;
     }
     std::lock_guard<std::mutex> lock(session->mu);
-    const moe_cache_device * device = moe_cache_device_for_backend(*session, backend);
-    if (device) {
-        session->tensor_devices[host_base] = device->logical;
+    // the first tie wins: the pools of a device are built once (moe_cache_shape_for), and a scheduler made later
+    // measures other free memory (llama_context::reserve keeps this session). Retied, its hosted MoE blocks would run
+    // on a device without the layer's pool (ggml_cuda_moe_hosted_block finds no block and the graph aborts)
+    const auto tied = session->tensor_backends.find(host_base);
+    if (tied != session->tensor_backends.end()) {
+        return tied->second;
     }
+    const moe_cache_device * device = moe_cache_device_for_backend(*session, backend);
+    if (!device) {
+        return nullptr;
+    }
+    session->tensor_devices[host_base]    = device->logical;
+    session->tensor_backends[host_base]   = backend;
+    return backend;
 }
 
 static void moe_cache_set_lend_size(void * opaque, size_t bytes, int n_zones) {

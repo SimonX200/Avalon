@@ -176,7 +176,7 @@ cache takes the rest of the VRAM, and the cache is prefilled from `moe-cache-ran
 On NVIDIA, backend sampling is on by default: the target's argmax runs on the GPU instead of over 248k logits on the
 CPU, 6% faster per step on the RTX 4090 (neutral on the RX 7900 XT, where it stays off; `-bs` / `-no-bs` force it).
 
-### Two or more GPUs (experimental, untested)
+### Two or more GPUs (experimental)
 
 ```bash
 GGML_MOE_CACHE_LAYER_DEVICE=1 avalon-server   # or the llama-server command above
@@ -188,16 +188,23 @@ their free VRAM. In generation, the MoE block of a layer runs on the GPU that ca
 cross per layer); the prefill and its expert prefetch stay on the first GPU. With one GPU the option changes nothing
 (measured: same speed, same text).
 
-**It has never run on two GPUs**: I have only one. If you have two RDNA3 cards, please try it and open an
-issue with the server log (`-lv 4`), your GPUs and how they are connected (x16 + x4, x8 / x8...). Known gap: the
-prefill only uses the first GPU's PCIe link, so with two cards in x8 / x8 slots it is probably slower than one card in x16
-(a per-GPU prefetch would fix it). Without the option, several GPUs are untested too.
+Measured on an EPYC 7402 with an RTX 3090 and an RTX 3090 Ti (both Gen4 x16), CUDA 13.4, the command above and the
+model above at 262144 context: prefill 1796 t/s against 1029 t/s with one GPU, decode median 97.3 t/s against
+81.3 t/s (median of 3 runs, MTP draft, acceptance 0.51-0.69 in both). The layers keep the GPU that first cached them:
+a device's pools are built once, so a layer that moved to a GPU without its pool had no hosted MoE block there and the
+first generation graph aborted (`MUL_MAT_ID with host weights outside a hosted MoE block`).
+
+Please still report other setups with the server log (`-lv 4`), your GPUs and how they are connected (x16 + x4,
+x8 / x8...). Known gap: the prefill only prefetches through the first GPU, so with two cards in x8 / x8 slots it is
+probably slower than one card in x16 (a per-GPU prefetch would fix it). Without the option, several GPUs are untested
+too.
 
 ## Limits
 
 - **One model.** Avalon is tuned for Qwen3.8-Flash-Next; the GGUF files above use types and a layout stock llama.cpp
   does not have. Other models run as in llama.cpp, without the expert cache work.
-- **One GPU measured.** Two or more: see above, experimental and untested.
+- **Two GPUs measured once.** See [Two or more GPUs](#two-or-more-gpus-experimental): an EPYC 7402 with an
+  RTX 3090 and an RTX 3090 Ti, both Gen4 x16. Other wiring (x8 / x8, x16 + x4) is still unmeasured.
 - **Tuned on RDNA3 with ROCm 7.2.** CUDA builds and was measured once, on a rented RTX 4090 (see
   [NVIDIA](#nvidia-cuda-one-rented-rtx-4090)); its kernels are not tuned for NVIDIA yet, and the installer is ROCm only.
   Windows is untested.
