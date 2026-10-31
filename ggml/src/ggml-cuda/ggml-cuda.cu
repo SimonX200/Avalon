@@ -5,6 +5,7 @@
 #include "ggml-cuda/allreduce.cuh"
 #include "ggml-cuda/common.cuh"
 #include "ggml-cuda/moe-cache.cuh"
+#include "ggml-cuda/copy-stage.cuh"
 #include "../ggml-backend-moe-cache.h"
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
@@ -3058,9 +3059,13 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
         return;
     }
 #endif
+    // an mmap'ed weight cannot be registered: copy it through the pinned ring instead of letting
+    // the driver stage it (13,9 against 26,2 GB/s measured, and the submitting thread stays free)
+    if (ggml_cuda_stage_h2d(cuda_ctx->device, (char *) tensor->data + offset, data, size, cuda_ctx->stream())) {
+        return;
+    }
     CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cuda_ctx->stream()));
 }
-
 static void ggml_backend_cuda_get_tensor_async(ggml_backend_t backend, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
@@ -3083,6 +3088,10 @@ static void ggml_backend_cuda_set_tensor_2d_async(ggml_backend_t backend, struct
 
     GGML_ASSERT(buf->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && "unsupported buffer type");
 
+    if (ggml_cuda_stage_2d_h2d(cuda_ctx->device, (char *) tensor->data + offset, stride_tensor, data,
+                               stride_data, size, n_copies, cuda_ctx->stream())) {
+        return;
+    }
     CUDA_CHECK(cudaMemcpy2DAsync(
         (char *) tensor->data + offset, stride_tensor, data, stride_data, size, n_copies, cudaMemcpyHostToDevice, cuda_ctx->stream()));
 }
